@@ -48,3 +48,6 @@ __pycache__/
 
 # VSCode settings
 .vscode/
+
+# Vectorstore folder
+apps/hsk-api/vectorstore/

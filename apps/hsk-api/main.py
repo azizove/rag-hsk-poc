@@ -9,4 +9,4 @@ def health_check():
 
 @app.get("/ask")
 def ask(q: str):
-    return {"answer": "This is aziz basha"}
+    return {"Question asked": q}
