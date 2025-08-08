@@ -1,50 +1,86 @@
 # apps/hsk-api/rag/query.py
 
+from typing import Dict, Any, List
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
 from langchain_community.vectorstores import Chroma
+from langchain.chains import RetrievalQA
 from rag.config import OPENAI_API_KEY, CHROMA_DB_DIR
+from rag.prompts import build_prompt
 
-# Load persisted vectorstore
 def get_vectorstore():
     embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
     return Chroma(persist_directory=CHROMA_DB_DIR, embedding_function=embeddings)
 
-# Create a custom prompt for HSK-style responses
-PROMPT_TEMPLATE = """
-You are an expert Chinese language teacher specializing in HSK exams.
-Use the provided context from documents to answer the user's question.
-If possible, generate examples in the style of HSK questions.
+def _normalize_query(q: str) -> str:
+    """Normalize user queries so HSKK is treated as HSK for retrieval & generation."""
+    q = q.replace("HSKK", "HSK").replace("hskk", "hsk")
+    # Extra nudge to the model baked into the user question:
+    q += "\n\nNote: Treat HSKK and HSK as equivalent."
+    return q
 
-Context:
-{context}
+def dedupe_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    unique = []
+    for s in sources:
+        key = (s.get("source"), s.get("page"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(s)
+    return unique
 
-Question:
-{question}
-
-Answer in the requested language.
-"""
-
-def ask_question(question: str, k: int = 4) -> str:
-    # Load vectorstore
+def ask_hsk(
+    question: str,
+    *,
+    exercise_type: str = "mcq",
+    level: int = 2,
+    difficulty: str = "medium",
+    num_questions: int = 3,
+    output_language: str = "English",
+    k: int = 6,  # ↑ a bit to broaden recall
+) -> Dict[str, Any]:
     db = get_vectorstore()
     retriever = db.as_retriever(search_kwargs={"k": k})
 
-    # LLM
     llm = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=OPENAI_API_KEY)
 
-    # Prompt
-    prompt = PromptTemplate(
-        template=PROMPT_TEMPLATE,
-        input_variables=["context", "question"]
+    prompt = build_prompt(
+        exercise_type=exercise_type,
+        level=level,
+        difficulty=difficulty,
+        num_questions=num_questions,
+        output_language=output_language,
     )
 
-    # Chain
     qa = RetrievalQA.from_chain_type(
         llm=llm,
         retriever=retriever,
-        chain_type_kwargs={"prompt": prompt}
+        chain_type="stuff",
+        chain_type_kwargs={"prompt": prompt},
+        return_source_documents=True,
     )
 
-    return qa.run(question)
+    normalized_q = _normalize_query(question)
+    result = qa({"query": normalized_q})
+
+    answer: str = result["result"]
+    sources = []
+    for doc in result.get("source_documents", []):
+        meta = doc.metadata or {}
+        sources.append(
+            {
+                "source": meta.get("source"),
+                "page": meta.get("page"),
+                "score": meta.get("score"),
+            }
+        )
+
+    return {
+        "answer": answer,
+        "exercise_type": exercise_type,
+        "level": level,
+        "difficulty": difficulty,
+        "num_questions": num_questions,
+        "output_language": output_language,
+        "k": k,
+        "sources": dedupe_sources(sources),
+    }
